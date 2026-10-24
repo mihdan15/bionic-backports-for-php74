@@ -1,0 +1,116 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PIN: pins/7.4.33-31
+  # Bump when rebuilding the same Sury revision; reset to 1 for a new pin.
+  REVISION: '1'
+  PKG_SUFFIX: legacy
+  # Set these as repository variables (Settings > Secrets and variables > Actions > Variables).
+  MAINTAINER_NAME: ${{ vars.MAINTAINER_NAME }}
+  MAINTAINER_EMAIL: ${{ vars.MAINTAINER_EMAIL }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch pinned sources
+        run: bash scripts/fetch-sources.sh "$PIN" work/sources
+      - name: Verify sources (pin, php.net, Sury signed index)
+        run: bash scripts/verify-sources.sh "$PIN" work/sources
+      - name: Compare the CVE patch with the upstream commit
+        run: bash scripts/verify-patch.sh "$PIN" work/sources
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sources
+          path: work/sources/
+          retention-days: 7
+
+  build:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: ubuntu18.04
+            image: ubuntu:18.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sources
+          path: work/sources
+      - name: Build packages in ${{ matrix.image }}
+        env:
+          TARGET: ${{ matrix.target }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          mkdir -p work/out
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/build:/repo:ro" -v "$PWD/$PIN:/pin:ro" \
+            -v "$PWD/work/sources:/sources:ro" -v "$PWD/work/out:/out" \
+            -e TARGET -e REVISION -e JOBS=4 -e PKG_SUFFIX -e MAINTAINER_NAME -e MAINTAINER_EMAIL \
+            "$IMAGE" bash /repo/build.sh 2>&1 | tee build.log
+          test -s work/out/SHA256SUMS
+          mv build.log work/out/build.log
+      - name: Smoke test in a clean ${{ matrix.image }}
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/tests:/tests:ro" -v "$PWD/work/out:/out:ro" \
+            "$IMAGE" bash /tests/smoke-test.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: php7.4-${{ matrix.target }}-amd64
+          path: work/out/
+          retention-days: 7
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: php7.4-*
+          path: dist
+      - name: Package release files
+        run: |
+          mkdir release
+          for dir in dist/php7.4-*; do
+            tar -cJf "release/${dir#dist/}.tar.xz" -C "$dir" .
+          done
+          (cd release && sha256sum ./*.tar.xz > SHA256SUMS)
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'release/*.tar.xz'
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md
