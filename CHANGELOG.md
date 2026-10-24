@@ -1,6 +1,6 @@
 # Changelog
 
-## v7.4.33-31.1 (unreleased)
+## v7.4.33-31.1 (2026-10-24)
 
 Rebuild of Sury's `php7.4` `1:7.4.33-31` for Ubuntu 18.04 amd64, as package version
 `1:7.4.33-31+legacy1~ubuntu18.04.1`.
