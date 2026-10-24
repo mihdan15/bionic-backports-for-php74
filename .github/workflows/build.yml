@@ -76,10 +76,16 @@ jobs:
           docker run --rm --platform linux/amd64 \
             -v "$PWD/tests:/tests:ro" -v "$PWD/work/out:/out:ro" \
             "$IMAGE" bash /tests/smoke-test.sh
+      - name: Package ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p work/release
+          tar -cJf "work/release/php7.4-$TARGET-amd64.tar.xz" -C work/out .
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: php7.4-${{ matrix.target }}-amd64
-          path: work/out/
+          path: work/release/php7.4-${{ matrix.target }}-amd64.tar.xz
           retention-days: 7
 
   release:
@@ -94,16 +100,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Each build job uploads one tarball named after its target, so merging is safe
+      # and the layout is the same for one target or many.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: php7.4-*
-          path: dist
-      - name: Package release files
+          path: release
+          merge-multiple: true
+      - name: Checksums
         run: |
-          mkdir release
-          for dir in dist/php7.4-*; do
-            tar -cJf "release/${dir#dist/}.tar.xz" -C "$dir" .
-          done
+          ls -l release
           (cd release && sha256sum ./*.tar.xz > SHA256SUMS)
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
